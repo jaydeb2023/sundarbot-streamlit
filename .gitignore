@@ -1,3 +1,6 @@
-.venv/
+﻿.venv/
 __pycache__/
 *.pyc
+assets/gallery/*
+!assets/gallery/.gitkeep
+*.csv

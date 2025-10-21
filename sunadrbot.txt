@@ -1,21 +1,25 @@
 """
-SundarBot — Streamlit MVP (single file, extended & fixed)
-- Weather (OpenWeatherMap) — set OWM_API_KEY
-- Best Places recommender
-- Add Places (hotels/shops/vendors) — persists to places.csv
-- Gallery with uploads — persists to gallery.csv (assets/gallery/)
-- Tour Companies list — persists to tour_companies.csv
-- Chat grounded on a tiny KB — uses OpenAI if OPENAI_API_KEY is set
-- Interactive Map (Folium) with reliable HTTPS tiles
+SundarBot — Streamlit MVP (single file, extended)
+-------------------------------------------------
+Adds:
+- Weather (rain + 5-day forecast via OpenWeatherMap; set OWM_API_KEY env var)
+- Best Places recommender (season/time/interest-aware)
+- Add Places (Hotels + Shops/Vendors) with map picker; persists to places.csv
+- Nearby finder (radius/category) + map markers
+- Events / important dates
+- Image gallery (remote URLs or local assets)
+- NEW: Tour Companies (list-only): public add form + searchable table (tour_companies.csv)
+- Original chat, KB, export, and portfolio preserved
+
+Run:
+1) pip install streamlit scikit-learn pandas numpy folium streamlit-folium reportlab requests python-dateutil
+2) streamlit run sundarbot_app.py
 """
 
 import os
 import io
-import re
 import json
 import time
-from math import radians, cos, sin, asin, sqrt
-from pathlib import Path
 from typing import List, Dict, Any
 from datetime import datetime, date
 
@@ -28,58 +32,38 @@ from sklearn.metrics.pairwise import cosine_similarity
 from folium import Map, Marker, Popup, Icon
 from streamlit_folium import st_folium
 
+# ---------- Optional weather deps ----------
 import requests
 from dateutil import tz
 
-# -----------------------------
+# =========================================================
 # Config / constants
-# -----------------------------
-st.set_page_config(page_title="SundarBot — Sundarban Eco-Guide", page_icon="🌿", layout="wide")
-
-# Base directory (works in Streamlit/Script modes)
-try:
-    BASE_DIR = Path(__file__).parent.resolve()
-except NameError:
-    BASE_DIR = Path.cwd().resolve()
-
-PAGE_ICON = "🌿"
+# =========================================================
+PAGE_ICON = "🌿"            # app icon
 PRIMARY_HEX = "#0f766e"     # teal-green
 ACCENT_HEX = "#eab308"      # sandy/gold
 DEFAULT_CENTER = (22.000, 88.700)  # approx Sundarban center (lat, lon)
+# correct: read from the environment variable named OWM_API_KEY
+OWM_KEY = os.getenv("OWM_API_KEY")  # e.g., export OWM_API_KEY="your-real-key"
+ # OpenWeatherMap key (optional)
 
-# API keys from ENV (FIXED)
-OWM_KEY = os.getenv("OWM_API_KEY")                 # OpenWeatherMap
-OPENAI_KEY = os.getenv("OPENAI_API_KEY")           # OpenAI
-
-# Optional OpenAI client (chat)
-client = None
-try:
-    if OPENAI_KEY:
-        from openai import OpenAI
-        client = OpenAI(api_key=OPENAI_KEY)
-except Exception:
-    client = None  # graceful fallback
-
-# Data files (under working dir)
-SUBMISSIONS_CSV = BASE_DIR / "submissions.csv"
-PLACES_CSV     = BASE_DIR / "places.csv"
-TOUR_CSV       = BASE_DIR / "tour_companies.csv"
-GALLERY_DIR    = BASE_DIR / "assets" / "gallery"
-GALLERY_CSV    = BASE_DIR / "gallery.csv"
-
-GALLERY_DIR.mkdir(parents=True, exist_ok=True)
-
+# ---------- Data files ----------
+SUBMISSIONS_CSV = "submissions.csv"
+PLACES_CSV = "places.csv"  # user-added hotels/shops/vendors
 PLACE_FIELDS = [
     "name","cat","lat","lon","address","phone","hours","website","notes","image_url","timestamp"
 ]
+
+# NEW: Tour company CSV
+TOUR_CSV = "tour_companies.csv"
 TOUR_FIELDS = [
     "company_name","contact_person","phone","email","website","address","license_no",
     "services","notes","timestamp"
 ]
 
-# -----------------------------
-# Knowledge Base (seed)
-# -----------------------------
+# =========================================================
+# Knowledge Base (seed; extend freely)
+# =========================================================
 KB_DOCS = [
     {
         "id": "wildlife_tiger",
@@ -127,16 +111,16 @@ KB_DOCS = [
         "title": "Eco-friendly Tips",
         "section": "Tips",
         "text": (
-            "Carry back all waste, use reef-safe sunscreen, keep noise low on boats, and maintain a safe distance from wildlife. "
-            "Choose certified operators and respect protected area rules and seasonal closures."
+                "Carry back all waste, use reef-safe sunscreen, keep noise low on boats, and maintain a safe distance from wildlife. "
+                "Choose certified operators and respect protected area rules and seasonal closures."
         ),
         "refs": [],
     },
 ]
 
-# -----------------------------
-# Portfolio (sample)
-# -----------------------------
+# =========================================================
+# Portfolio (replace URLs with real links)
+# =========================================================
 PORTFOLIO = [
     {
         "name": "Camera Trap Wildlife Detection (YOLOv8)",
@@ -158,9 +142,9 @@ PORTFOLIO = [
     },
 ]
 
-# -----------------------------
+# =========================================================
 # Retrieval over KB (TF-IDF)
-# -----------------------------
+# =========================================================
 class Retriever:
     def __init__(self, docs: List[Dict[str, Any]]):
         self.docs = docs
@@ -193,40 +177,26 @@ def get_retriever():
 
 retriever = get_retriever()
 
+# =========================================================
+# Simple LLM gateway (stub; replace with your model)
+# =========================================================
 SYSTEM_PROMPT = (
     "You are 'SundarBot', an AI guide for the Sundarban ecosystem. Be accurate, friendly, and conservation-first. "
     "Prioritize safety, local regulations, and eco-friendly practices. If unsure, say so and suggest trusted sources."
 )
 
 def llm_generate(system_prompt: str, history: List[Dict[str, str]], user_query: str, kb_context: str) -> str:
-    """OpenAI-backed chat with graceful fallback if no key is set."""
-    if client is None:
-        return (
-            "🔌 OpenAI is not configured (set OPENAI_API_KEY). "
-            "Here’s a KB-based response meanwhile:\n\n" + kb_context
-        )
+    # Replace with a real model call if you like.
+    answer = (
+        "Thanks for asking! Here's what I found related to your question.\n\n" +
+        kb_context +
+        "\n\nIf you need routes, birding spots, or eco-friendly tips for your itinerary, tell me your trip dates and interests."
+    )
+    return answer
 
-    # compact history (last 6 turns)
-    msgs = [{"role": "system", "content": system_prompt}]
-    for m in history[-6:]:
-        if m["role"] in ("user", "assistant"):
-            msgs.append({"role": m["role"], "content": m["content"]})
-    msgs.append({"role": "system", "content": f"Context to cite from KB:\n{kb_context}"})
-    msgs.append({"role": "user", "content": user_query})
-
-    try:
-        resp = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=msgs,
-            temperature=0.4,
-        )
-        return resp.choices[0].message.content.strip()
-    except Exception as e:
-        return f"(LLM error: {e})\n\nKB context:\n{kb_context}"
-
-# -----------------------------
+# =========================================================
 # Weather (OpenWeatherMap One Call)
-# -----------------------------
+# =========================================================
 @st.cache_data(ttl=60*30)  # cache 30 min
 def fetch_weather(lat: float, lon: float, units: str = "metric"):
     if not OWM_KEY:
@@ -248,7 +218,7 @@ def render_weather_panel(lat: float, lon: float, tz_name="Asia/Kolkata"):
         st.warning("Set OWM_API_KEY to enable live weather.")
         return
     local_tz = tz.gettz(tz_name)
-    current = data.get("current", {}) or {}
+    current = data.get("current", {})
     daily = data.get("daily", [])[:5]
 
     st.subheader("🌦 Weather & Rain Forecast")
@@ -257,7 +227,10 @@ def render_weather_panel(lat: float, lon: float, tz_name="Asia/Kolkata"):
         st.metric("Now", f"{round(current.get('temp', 0))}°C", help=current.get("weather", [{}])[0].get("description",""))
     with colB:
         pop = current.get("pop")
-        pop = int(round(pop*100)) if pop is not None else 0
+        if pop is None:
+            pop = 0
+        else:
+            pop = int(round(pop*100))
         st.metric("Rain chance (now)", f"{pop}%")
     with colC:
         wind = current.get("wind_speed", 0)
@@ -275,35 +248,32 @@ def render_weather_panel(lat: float, lon: float, tz_name="Asia/Kolkata"):
         desc = d.get("weather",[{}])[0].get("description","")
         st.markdown(f"- **{dt_local}** — {tmin}–{tmax}°C • rain chance **{pop}%** • rain {rain} mm • {desc}")
 
-# -----------------------------
-# Simple data helpers
-# -----------------------------
-def haversine_km(a_lat, a_lon, b_lat, b_lon):
-    R = 6371.0
-    dlat, dlon = radians(b_lat-a_lat), radians(b_lon-a_lon)
-    lat1, lat2 = radians(a_lat), radians(b_lat)
-    h = sin(dlat/2)**2 + cos(lat1)*cos(lat2)*sin(dlon/2)**2
-    return 2*R*asin(sqrt(h))
-
-def load_csv(path: Path, columns: list[str]) -> pd.DataFrame:
+# =========================================================
+# Places: built-in + user-added (CSV)
+# =========================================================
+def load_user_places() -> pd.DataFrame:
     try:
-        df = pd.read_csv(path)
-        for c in columns:
-            if c not in df.columns:
-                df[c] = ""
-        df = df[columns]
+        df = pd.read_csv(PLACES_CSV)
+        missing = [c for c in PLACE_FIELDS if c not in df.columns]
+        for m in missing: df[m] = ""
+        return df[PLACE_FIELDS]
     except Exception:
-        df = pd.DataFrame(columns=columns)
-    return df
+        return pd.DataFrame(columns=PLACE_FIELDS)
 
-def save_row(path: Path, row: dict):
-    df = load_csv(path, list(row.keys()))
+def save_user_place(row: dict):
+    df = load_user_places()
     df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
-    df.to_csv(path, index=False)
+    df.to_csv(PLACES_CSV, index=False)
 
-# -----------------------------
-# Local places (defaults)
-# -----------------------------
+def combined_places(default_list: list[dict]) -> pd.DataFrame:
+    user = load_user_places()
+    base = pd.DataFrame(default_list)
+    for c in PLACE_FIELDS:
+        if c not in base.columns:
+            base[c] = ""
+    return pd.concat([base[PLACE_FIELDS], user[PLACE_FIELDS]], ignore_index=True)
+
+# default local places (edit/extend)
 LOCAL_PLACES = [
     {"name":"Sajnekhali Permit Counter","cat":"permit","lat":22.109,"lon":88.797,
      "address":"Sajnekhali","phone":"","hours":"8:00–16:00","website":"","notes":"Official permits & basic info","image_url":"","timestamp":""},
@@ -315,27 +285,9 @@ LOCAL_PLACES = [
      "address":"Marketplace","phone":"+91-0000-000222","hours":"By appt","website":"","notes":"Licensed guide; birding & creeks","image_url":"","timestamp":""},
 ]
 
-def load_user_places() -> pd.DataFrame:
-    df = load_csv(PLACES_CSV, PLACE_FIELDS)
-    # strong typing for lat/lon so Folium never chokes
-    for c in ["lat", "lon"]:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-    return df
-
-def save_user_place(row: dict):
-    save_row(PLACES_CSV, row)
-
-def combined_places(default_list: list[dict]) -> pd.DataFrame:
-    user = load_user_places()
-    base = pd.DataFrame(default_list)
-    for c in PLACE_FIELDS:
-        if c not in base.columns:
-            base[c] = ""
-    return pd.concat([base[PLACE_FIELDS], user[PLACE_FIELDS]], ignore_index=True)
-
-# -----------------------------
+# =========================================================
 # POIs + Recommender
-# -----------------------------
+# =========================================================
 POIS = [
     {
         "name": "Sajnekhali Interpretation Centre",
@@ -393,9 +345,42 @@ def recommend_pois(interests: list[str], season: str | None = None, time_of_day:
     top = [dict(p, score=s) for s, p in scored[:k] if s > 0] or [dict(scored[0][1], score=scored[0][0])]
     return top
 
-# -----------------------------
-# CSS
-# -----------------------------
+# =========================================================
+# Utilities (distance)
+# =========================================================
+from math import radians, cos, sin, asin, sqrt
+
+def haversine_km(a_lat, a_lon, b_lat, b_lon):
+    R = 6371.0
+    dlat, dlon = radians(b_lat-a_lat), radians(b_lon-a_lon)
+    lat1, lat2 = radians(a_lat), radians(b_lat)
+    h = sin(dlat/2)**2 + cos(lat1)*cos(lat2)*sin(dlon/2)**2
+    return 2*R*asin(sqrt(h))
+
+# =========================================================
+# Tour Companies: load/save
+# =========================================================
+def load_tours() -> pd.DataFrame:
+    try:
+        df = pd.read_csv(TOUR_CSV)
+        # ensure all fields exist
+        missing = [c for c in TOUR_FIELDS if c not in df.columns]
+        for m in missing: df[m] = ""
+        return df[TOUR_FIELDS]
+    except Exception:
+        return pd.DataFrame(columns=TOUR_FIELDS)
+
+def save_tour(row: dict):
+    df = load_tours()
+    df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+    df.to_csv(TOUR_CSV, index=False)
+
+# =========================================================
+# Streamlit UI
+# =========================================================
+st.set_page_config(page_title="SundarBot — Sundarban Eco-Guide", page_icon=PAGE_ICON, layout="wide")
+
+# ----- CSS -----
 st.markdown(
     f"""
     <style>
@@ -422,15 +407,17 @@ st.markdown(
     .muted {{ color: #475569; }}
     .btn-primary button {{ background: {PRIMARY_HEX} !important; border-color: {PRIMARY_HEX} !important; }}
     a, .stMarkdown a {{ color: {PRIMARY_HEX}; }}
+    @media (max-width: 768px) {{
+        .sundar-hero {{ min-height: 320px; background-position: 50% 80%; }}
+    }}
+    /* tighten page gutters so map can stretch */
     .block-container {{ padding-left: 1rem; padding-right: 1rem; }}
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-# -----------------------------
-# Hero
-# -----------------------------
+# ----- Hero -----
 st.markdown(
     """
     <div class="sundar-hero">
@@ -442,9 +429,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# -----------------------------
-# Sidebar: Portfolio + Nearby
-# -----------------------------
+# ----- Sidebar (Portfolio + Nearby) -----
 with st.sidebar:
     st.header("👨‍💻 Portfolio")
     for p in PORTFOLIO:
@@ -461,7 +446,7 @@ with st.sidebar:
     ALL_PLACES_DF = combined_places(LOCAL_PLACES)
     nearby = []
     for _, p in ALL_PLACES_DF.iterrows():
-        if p["cat"] in cat and not pd.isna(p["lat"]) and not pd.isna(p["lon"]):
+        if p["cat"] in cat:
             d = haversine_km(base_lat, base_lon, float(p["lat"]), float(p["lon"]))
             if d <= radius:
                 row = p.to_dict()
@@ -480,23 +465,21 @@ with st.sidebar:
     else:
         st.caption("No matches in selected radius.")
 
-# -----------------------------
-# Tabs
-# -----------------------------
+# ----- Tabs -----
 tabs = st.tabs([
     "💬 Chat", "🗺️ Map", "📝 Submit",
     "⭐ Best Places", "🌧 Weather", "🖼 Gallery", "➕ Add Places",
     "🏝️ Tour Companies", "📚 Knowledge Base"
 ])
 
-# -----------------------------
+# =========================================================
 # Tab 1: Chat
-# -----------------------------
+# =========================================================
 with tabs[0]:
     if "chat" not in st.session_state: st.session_state.chat = []
     def add_chat(role: str, content: str): st.session_state.chat.append({"role": role, "content": content})
 
-    # history
+    # show history
     for m in st.session_state.chat:
         with st.chat_message(m["role"]):
             st.markdown(m["content"])
@@ -505,14 +488,14 @@ with tabs[0]:
     if user_query:
         add_chat("user", user_query)
 
-        # retrieve KB context
+        # retrieve
         hits = retriever.search(user_query, top_k=3)
         kb_context = "\n\n".join([f"- {h['title']}: {h['snippet']}" for h in hits]) or "(No direct KB match; answering generally.)"
 
-        # base answer via LLM (or fallback)
+        # base answer
         answer = llm_generate(SYSTEM_PROMPT, st.session_state.chat, user_query, kb_context)
 
-        # simple recommender trigger
+        # naive recommend intent
         uq = user_query.lower()
         if any(w in uq for w in ["recommend","suggest","best place","where should i go","itinerary"]):
             season = None
@@ -522,12 +505,26 @@ with tabs[0]:
             for t in ["morning","afternoon","late-afternoon","evening"]:
                 if t in uq: time_hint = t
 
+            # weather-aware tweak (optional)
+            rain_prob_now = None
+            if OWM_KEY:
+                try:
+                    wx = fetch_weather(*DEFAULT_CENTER)
+                    hourly = (wx.get("hourly") or [{}])[0]
+                    if "pop" in hourly:
+                        rain_prob_now = int(round(hourly["pop"]*100))
+                    if (rain_prob_now is not None) and rain_prob_now >= 60 and (not season):
+                        season = "monsoon"
+                except Exception:
+                    pass
+
             interests = [kw for kw in ["birding","family","beginner","education","canopy","crocodile","tiger","advanced"] if kw in uq] or ["birding"]
             recs = recommend_pois(interests, season=season, time_of_day=time_hint, k=3)
-            st.session_state.last_recs = recs
+            st.session_state.last_recs = recs  # store for map highlight
 
+            tip = f" (rain chance {rain_prob_now}% — choose sheltered spots)" if rain_prob_now is not None else ""
             lines = [f"**{r['name']}** — {r['type']}  \n*Why:* {r.get('tips','')}" for r in recs]
-            answer += f"\n\n**Recommended places:**\n" + "\n".join(f"- {x}" for x in lines)
+            answer += f"\n\n**Recommended places{tip}:**\n" + "\n".join(f"- {x}" for x in lines)
 
         add_chat("assistant", answer)
         with st.chat_message("assistant"):
@@ -541,64 +538,58 @@ with tabs[0]:
 
     # export chat
     st.subheader("Export Conversation")
-    # Build buffers on the fly for direct download buttons
-    txt_buf = io.StringIO()
-    for m in st.session_state.chat:
-        txt_buf.write(f"{m['role'].upper()}: {m['content']}\n\n")
-    st.download_button("Download as TXT", data=txt_buf.getvalue(), file_name="sundarbot_chat.txt", use_container_width=False)
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Download as TXT"):
+            buf = io.StringIO()
+            for m in st.session_state.chat:
+                buf.write(f"{m['role'].upper()}: {m['content']}\n\n")
+            st.download_button("Save TXT", data=buf.getvalue(), file_name="sundarbot_chat.txt")
+    with col2:
+        if st.button("Generate PDF (optional)"):
+            try:
+                from reportlab.lib.pagesizes import LETTER
+                from reportlab.pdfgen import canvas
+                pdf_buf = io.BytesIO()
+                c = canvas.Canvas(pdf_buf, pagesize=LETTER)
+                width, height = LETTER
+                y = height - 50
+                c.setFont("Helvetica", 11)
+                c.drawString(50, y, "SundarBot Conversation Export"); y -= 20
+                for m in st.session_state.chat:
+                    lines = (m['role'].upper() + ": " + m['content']).split("\n")
+                    for line in lines:
+                        if y < 60:
+                            c.showPage(); y = height - 50; c.setFont("Helvetica", 11)
+                        c.drawString(50, y, line[:95]); y -= 16
+                    y -= 8
+                c.save()
+                st.download_button("Save PDF", data=pdf_buf.getvalue(), file_name="sundarbot_chat.pdf")
+            except Exception:
+                st.warning("ReportLab not installed; falling back to TXT.")
 
-    # Optional PDF
-    try:
-        from reportlab.lib.pagesizes import LETTER
-        from reportlab.pdfgen import canvas
-        pdf_buf = io.BytesIO()
-        c = canvas.Canvas(pdf_buf, pagesize=LETTER)
-        width, height = LETTER
-        y = height - 50
-        c.setFont("Helvetica", 11)
-        c.drawString(50, y, "SundarBot Conversation Export"); y -= 20
-        for m in st.session_state.chat:
-            lines = (m['role'].upper() + ": " + m['content']).split("\n")
-            for line in lines:
-                if y < 60:
-                    c.showPage(); y = height - 50; c.setFont("Helvetica", 11)
-                c.drawString(50, y, line[:95]); y -= 16
-            y -= 8
-        c.save()
-        st.download_button("Download PDF", data=pdf_buf.getvalue(), file_name="sundarbot_chat.pdf")
-    except Exception:
-        st.caption("Install reportlab to enable PDF export.")
-
-# -----------------------------
-# Tab 2: Map (fixed HTTPS tiles & bounds)
-# -----------------------------
+# =========================================================
+# Tab 2: Map
+# =========================================================
 with tabs[1]:
     st.subheader("🗺️ Interactive Map: POIs + User Places")
 
-    # Reliable HTTPS tiles (avoid blocked defaults)
-    fmap = Map(
-        location=[float(DEFAULT_CENTER[0]), float(DEFAULT_CENTER[1])],
-        zoom_start=9,
-        tiles="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
-        attr="© OpenStreetMap contributors",
-        prefer_canvas=True
-    )
+    df_poi = pd.DataFrame(POIS)
+    center = [df_poi["lat"].mean(), df_poi["lon"].mean()]
+    fmap = Map(location=center, zoom_start=9)
 
     # POIs
-    df_poi = pd.DataFrame(POIS)
     for _, r in df_poi.iterrows():
         Marker(
-            location=[float(r["lat"]), float(r["lon"])],
+            location=[r.lat, r.lon],
             popup=Popup(f"<b>{r['name']}</b><br/>{r['type']} — {r['tips']}", max_width=260),
             icon=Icon(color="green" if r["type"]!="Visitor" else "blue", icon="info-sign"),
         ).add_to(fmap)
 
-    # User/default places
+    # User + default places
     ALL_PLACES_DF = combined_places(LOCAL_PLACES)
     highlight_names = {r['name'] for r in st.session_state.get("last_recs", [])} if st.session_state.get("last_recs") else set()
     for _, r in ALL_PLACES_DF.iterrows():
-        if pd.isna(r["lat"]) or pd.isna(r["lon"]):
-            continue
         color = ("red" if r.get("cat") in ["hotel","restaurant"] else
                  "green" if r.get("cat") in ["vendor","shop"] else
                  "blue")
@@ -613,25 +604,17 @@ with tabs[1]:
             icon=Icon(color=color, icon="info-sign"),
         ).add_to(fmap)
 
-    # Fit bounds if enough points
-    bounds = []
-    for _, r in df_poi.iterrows():
-        bounds.append([float(r["lat"]), float(r["lon"])])
-    for _, r in ALL_PLACES_DF.iterrows():
-        if not (pd.isna(r["lat"]) or pd.isna(r["lon"])):
-            bounds.append([float(r["lat"]), float(r["lon"])])
-
-    if len(bounds) > 1:
-        try:
-            fmap.fit_bounds(bounds)
-        except Exception:
-            pass
+    # Fit bounds so there’s no empty gap
+    bounds = [[r.lat, r.lon] for _, r in df_poi.iterrows()] + \
+             [[float(r["lat"]), float(r["lon"])] for _, r in ALL_PLACES_DF.iterrows()]
+    if bounds:
+        fmap.fit_bounds(bounds)
 
     st_folium(fmap, height=520, use_container_width=True)
 
-# -----------------------------
-# Tab 3: Submit
-# -----------------------------
+# =========================================================
+# Tab 3: Submit (feedback & sightings)
+# =========================================================
 with tabs[2]:
     st.subheader("📝 Submit ideas or wildlife sightings")
     with st.form("feedback_form"):
@@ -658,9 +641,9 @@ with tabs[2]:
                 st.success("Thanks! Your submission was recorded.")
                 st.download_button("Download your submission (JSON)", data=json.dumps(row, indent=2), file_name=f"submission_{ts}.json")
 
-# -----------------------------
+# =========================================================
 # Tab 4: Best Places (recommender UI)
-# -----------------------------
+# =========================================================
 with tabs[3]:
     st.subheader("⭐ Best Places (by season & interests)")
     c1, c2, c3 = st.columns([1,1,1])
@@ -701,34 +684,71 @@ with tabs[3]:
         for e in upcoming_events():
             st.markdown(f"**{e['title']}** — {e['spot']}  \n{e['from']} → {e['to']}  \n*{e['notes']}*")
 
-# -----------------------------
+# =========================================================
 # Tab 5: Weather
-# -----------------------------
+# =========================================================
 with tabs[4]:
     st.subheader("🌧 Weather")
     st.info("Weather for the Sundarban center; you can wire GPS/user selection later.")
     render_weather_panel(*DEFAULT_CENTER)
 
-# -----------------------------
-# Tab 6: Gallery (skip missing files)
-# -----------------------------
+# =========================================================
+# Tab 6: Gallery (static URLs today)
+# =========================================================
+# ----------------------------
+# Tab 6 (index 5): Image Gallery with Upload
+# ----------------------------
+# ----------------------------
+# Tab 6 (index 5): Image Gallery with safe base files + Upload
+# ----------------------------
+# ============================
+# FULL GALLERY TAB (drop-in)
+# Tab index: 5  ->  with tabs[5]:
+# Features:
+#  - Shows base images (if present on disk)
+#  - Anyone can upload JPG/PNG to assets/gallery/
+#  - Persists uploads to gallery.csv
+#  - Works on Windows/macOS/Linux (uses absolute paths)
+#  - Compatible with Streamlit >= 1.31 (uses st.rerun fallback)
+# ============================
+
 with tabs[5]:
     st.subheader("🖼 Image Gallery")
 
-    # Base items (optional local files)
+    # ---------- helpers & setup ----------
+    import os, re, time
+    from pathlib import Path
+    import pandas as pd
+
+    # Safe rerun across Streamlit versions
+    def _rerun():
+        if hasattr(st, "rerun"):
+            st.rerun()
+        elif hasattr(st, "experimental_rerun"):
+            st.experimental_rerun()
+
+    BASE_DIR = Path(__file__).parent.resolve()
+    GALLERY_DIR = BASE_DIR / "assets" / "gallery"
+    GALLERY_CSV = BASE_DIR / "gallery.csv"
+    GALLERY_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Base images — these are just placeholders. Keep/remove/edit as you like.
+    # Files are optional: if not found, they will be skipped (no crash).
     BASE_GALLERY = [
-        {"caption": "Creek reflections", "url": (GALLERY_DIR / "creek.jpg").as_posix()},
-        {"caption": "Dobanki canopy",    "url": (GALLERY_DIR / "dobanki.jpg").as_posix()},
-        {"caption": "Tour boats",        "url": (GALLERY_DIR / "boats.jpg").as_posix()},
-        {"caption": "Boat at dusk",      "url": (GALLERY_DIR / "dusk.jpg").as_posix()},
+        {"caption": "Creek reflections", "url": GALLERY_DIR / "creek.jpg"},
+        {"caption": "Dobanki canopy",    "url": GALLERY_DIR / "dobanki.jpg"},
+        {"caption": "Tour boats",        "url": GALLERY_DIR / "boats.jpg"},
+        {"caption": "Boat at dusk",      "url": GALLERY_DIR / "dusk.jpg"},
     ]
 
+    # CSV helpers for uploaded items
     def _to_records(df: pd.DataFrame) -> list[dict]:
         return df.to_dict("records") if not df.empty else []
 
     def load_uploaded() -> list[dict]:
         if GALLERY_CSV.exists():
             df = pd.read_csv(GALLERY_CSV)
+            # ensure columns exist
             for c in ["caption", "url", "timestamp"]:
                 if c not in df.columns:
                     df[c] = ""
@@ -743,20 +763,26 @@ with tabs[5]:
             df = pd.DataFrame([row])
         df.to_csv(GALLERY_CSV, index=False)
 
+    # Compose gallery items (base + uploaded)
+    def _path_to_str(p: Path) -> str:
+        return p.as_posix()
+
     items: list[dict] = []
     # include base files that actually exist
     for it in BASE_GALLERY:
-        p = it["url"]
-        if os.path.isfile(p):
-            items.append({"caption": it["caption"], "url": p})
+        p: Path = it["url"]
+        if isinstance(p, Path) and p.is_file():
+            items.append({"caption": it["caption"], "url": _path_to_str(p)})
 
     # include uploaded items from CSV
     items.extend(load_uploaded())
 
+    # ---------- renderer ----------
     def render_gallery(items: list[dict], cols: int = 3):
         if not items:
             st.info("No gallery images yet. Upload some below 👇")
             return
+
         rows = [items[i:i+cols] for i in range(0, len(items), cols)]
         for row in rows:
             cs = st.columns(len(row))
@@ -764,13 +790,19 @@ with tabs[5]:
                 with c:
                     url = it.get("url", "")
                     cap = it.get("caption", "")
-                    if (url.startswith(("http://", "https://")) and url) or (url and os.path.isfile(url)):
+                    # local file
+                    if url and os.path.isfile(url):
                         st.image(url, use_container_width=True, caption=cap)
-                    # else: skip silently
+                    # allow http(s) if you later add remote images
+                    elif url.startswith("http://") or url.startswith("https://"):
+                        st.image(url, use_container_width=True, caption=cap)
+                    else:
+                        st.warning(f"Missing file: {url}")
 
     render_gallery(items, cols=3)
     st.divider()
 
+    # ---------- upload form ----------
     st.markdown("### ➕ Add a photo")
     with st.form("gallery_upload", clear_on_submit=True):
         file = st.file_uploader("Select image (JPG/PNG)", type=["jpg", "jpeg", "png"])
@@ -781,6 +813,7 @@ with tabs[5]:
             if not file:
                 st.error("Please select an image.")
             else:
+                # unique, safe filename under assets/gallery/
                 base = re.sub(r"[^a-zA-Z0-9._-]", "_", file.name)
                 fname = f"{int(time.time())}_{base}"
                 save_path = GALLERY_DIR / fname
@@ -789,21 +822,22 @@ with tabs[5]:
 
                 row = {
                     "caption": cap or Path(file.name).stem,
-                    "url": save_path.as_posix(),
+                    "url": _path_to_str(save_path),
                     "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                 }
                 append_uploaded(row)
-                st.success("Uploaded! Refresh the page to see it above.")
 
-# -----------------------------
-# Tab 7: Add Places
-# -----------------------------
+                st.success("Uploaded! Refreshing…")
+                _rerun()
+
+# =========================================================
+# Tab 7: Add Places (Hotel + Shop/Vendor) with map picker
+# =========================================================
 with tabs[6]:
     st.subheader("➕ Add a Place (Hotel or Nearby Shop/Vendor)")
     st.caption("Pick a location by clicking the map (you can also type coordinates).")
-    picker_map = Map(location=[DEFAULT_CENTER[0], DEFAULT_CENTER[1]], zoom_start=10,
-                     tiles="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
-                     attr="© OpenStreetMap contributors")
+    picker_center = [DEFAULT_CENTER[0], DEFAULT_CENTER[1]]
+    picker_map = Map(location=picker_center, zoom_start=10)
     pick_state = st_folium(picker_map, height=320, use_container_width=True, key="place_picker")
     clicked = (pick_state.get("last_clicked") or {})
     clicked_lat = clicked.get("lat")
@@ -867,19 +901,14 @@ with tabs[6]:
     st.caption("All added places are stored in `places.csv` next to the app.")
     st.dataframe(load_user_places())
 
-# -----------------------------
-# Tab 8: Tour Companies
-# -----------------------------
-def load_tours() -> pd.DataFrame:
-    return load_csv(TOUR_CSV, TOUR_FIELDS)
-
-def save_tour(row: dict):
-    save_row(TOUR_CSV, row)
-
+# =========================================================
+# Tab 8: Tour Companies (list-only)
+# =========================================================
 with tabs[7]:
     st.subheader("🏝️ Sundarban Tour Companies — Public List")
     st.caption("Anyone can add a tour operator here. Entries are stored in `tour_companies.csv`.")
 
+    # Add form
     with st.form("add_tour_company"):
         col1, col2 = st.columns(2)
         with col1:
@@ -914,23 +943,27 @@ with tabs[7]:
 
     st.divider()
 
+    # Search + table
     q = st.text_input("Quick search (name, phone, services, notes)")
     df_tour = load_tours()
     if q:
         ql = q.lower()
-        mask = df_tour.fillna("").apply(
-            lambda row: ql in (" ".join([str(x) for x in row.values])).lower(), axis=1
+        mask = (
+            df_tour.fillna("").apply(lambda row:
+                ql in (" ".join([str(x) for x in row.values])).lower(), axis=1
+            )
         )
         df_tour = df_tour[mask]
 
     st.dataframe(df_tour, use_container_width=True)
 
+    # Export
     if not df_tour.empty:
         st.download_button("Download CSV", data=df_tour.to_csv(index=False), file_name="tour_companies.csv")
 
-# -----------------------------
+# =========================================================
 # Tab 9: Knowledge Base
-# -----------------------------
+# =========================================================
 with tabs[8]:
     st.subheader("📚 Knowledge Base")
     sect = st.multiselect("Filter by section", sorted({d["section"] for d in KB_DOCS}), default=[])
@@ -948,8 +981,8 @@ with tabs[8]:
                 for r in d["refs"]:
                     st.markdown(f"- [{r['label']}]({r['url']})")
 
-# -----------------------------
+# =========================================================
 # Footer
-# -----------------------------
+# =========================================================
 st.markdown("---")
 st.caption("© 2025 SundarBot • Built with Streamlit • Colors: green/teal/sandy • Icon: mangrove + circuit motif")
